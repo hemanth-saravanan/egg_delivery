@@ -10,37 +10,72 @@ import 'dart:math' show cos, sqrt, asin, min, max, exp, Random;
 
 // --- THE NEW GOOGLE APPS SCRIPT CODE (Includes doGet) ---
 const String _googleScriptCode = r'''
+// 1. READ DATA (Fetch rows + Colors)
 function doGet(e) {
+
+  //Edit Sheet1 to be the name of the sheet with your data
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
   var lastRow = sheet.getLastRow();
-  if (lastRow < 2) return ContentService.createTextOutput(JSON.stringify([])).setMimeType(ContentService.MimeType.JSON);
   
+  // If sheet is empty, return empty list
+  if (lastRow < 2) {
+    return ContentService.createTextOutput(JSON.stringify([]))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Get all data and all background colors in one batch
+  // We assume columns A-F (1-6)
   var range = sheet.getRange(2, 1, lastRow - 1, 6);
   var values = range.getValues();
   var backgrounds = range.getBackgrounds();
+
   var data = [];
 
   for (var i = 0; i < values.length; i++) {
-    var color = backgrounds[i][0].toLowerCase();
+    var color = backgrounds[i][0].toLowerCase(); // Check color of Column A
     var status = "pending";
+
+    // Map specific colors to status
+    // #b6d7a8 is the Light Green we use
+    // #ea9999 is the Light Red we use
     if (color == "#b6d7a8") status = "complete";
     if (color == "#ea9999") status = "texted";
 
     data.push({
-      "name": values[i][0], "address": values[i][1], "phone": values[i][2],
-      "dozens": values[i][3], "notes": values[i][4], "coords": values[i][5],
-      "status": status, "originalRow": i + 2
+      "name": values[i][0],
+      "address": values[i][1],
+      "phone": values[i][2],
+      "dozens": values[i][3],
+      "notes": values[i][4],
+      "coords": values[i][5],
+      "status": status,
+      "originalRow": i + 2 // Row index for updates
     });
   }
-  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
+
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
+// 2. WRITE DATA (Update Colors)
 function doPost(e) {
   var params = JSON.parse(e.postData.contents);
+  var rowIndex = params.row;
+  var action = params.status;
+
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1"); 
-  var range = sheet.getRange(params.row, 1, 1, 6);
-  if (params.status == "texted") range.setBackground("#ea9999");
-  else range.setBackground("#b6d7a8");
+  var range = sheet.getRange(rowIndex, 1, 1, 6);
+  
+  if (action == "texted") {
+    range.setBackground("#ea9999"); // Light Red
+    //sheet.getRange(rowIndex, 7).setValue("Not Picked Up");
+  } else {
+    range.setBackground("#b6d7a8"); // Light Green
+    //optionally add text to a column whenever something is marked as delivered
+    //sheet.getRange(rowIndex, 7).setValue("Delivered");
+  }
+
+
   return ContentService.createTextOutput(JSON.stringify({"status": "success"}));
 }
 ''';
@@ -449,9 +484,9 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text("Settings")),
       body: Padding(padding: const EdgeInsets.all(16.0), child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Center(child: TextButton.icon(onPressed: () => _showHelp("Spreadsheet Format", "A: Name\nB: Address\nC: Phone\nD: Dozens\nE: Notes\nF: Coordinates\n\n(Colors update automatically!)"), icon: const Icon(Icons.table_chart), label: const Text("View Required Sheet Format"))),
+          Center(child: TextButton.icon(onPressed: () => _showHelp("Spreadsheet Format", "A: Name\nB: Address\nC: Phone\nD: Dozens\nE: Notes\nF: Coordinates\n"), icon: const Icon(Icons.table_chart), label: const Text("View Required Sheet Format"))),
           const Divider(), const SizedBox(height: 10),
-          Row(children: [const Text("1. Google Script URL", style: TextStyle(fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.help_outline, color: Colors.blue), onPressed: () => _showHelp("How to set up Script", "1. Extensions > Apps Script.\n2. Paste code (Copy button ->).\n3. Deploy > New deployment > Web app.\n4. Access: 'Anyone'.\n5. Deploy & Copy URL.")), TextButton.icon(onPressed: _copyScript, icon: const Icon(Icons.copy, size: 16), label: const Text("COPY SCRIPT"), style: TextButton.styleFrom(foregroundColor: Colors.teal, textStyle: const TextStyle(fontWeight: FontWeight.bold)))]),
+          Row(children: [const Text("1. Google Script URL", style: TextStyle(fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.help_outline, color: Colors.blue), onPressed: () => _showHelp("How to set up Script", "1. Make your Google Sheet according to required format\n2. Extensions > Apps Script.\n3. Paste code (Copy button ->).\n4. Deploy > New deployment > Web app.\n5. Access: 'Anyone'.\n6. Deploy & Copy URL.")), TextButton.icon(onPressed: _copyScript, icon: const Icon(Icons.copy, size: 16), label: const Text("COPY SCRIPT"), style: TextButton.styleFrom(foregroundColor: Colors.teal, textStyle: const TextStyle(fontWeight: FontWeight.bold)))]),
           TextField(controller: _scriptController, decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "https://script.google.com/..."), maxLines: 2),
           const SizedBox(height: 20), const Text("2. Message Template", style: TextStyle(fontWeight: FontWeight.bold)), TextField(controller: _msgController, decoration: const InputDecoration(border: OutlineInputBorder()), maxLines: 2),
           const SizedBox(height: 20), SwitchListTile(title: const Text("Use WhatsApp"), value: _useWhatsApp, onChanged: (val) => setState(() => _useWhatsApp = val)),

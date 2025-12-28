@@ -265,7 +265,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     List<DeliveryStop> pendingStops = stops.where((s) => !s.isCompleted).toList();
     if (pendingStops.isEmpty) { _showErrorSnackBar("All deliveries completed!"); return; }
 
-    int chunkSize = 9; 
+    int chunkSize = 10;
     List<List<DeliveryStop>> chunks = [];
     for (int i = 0; i < pendingStops.length; i += chunkSize) {
       chunks.add(pendingStops.sublist(i, i + chunkSize > pendingStops.length ? pendingStops.length : i + chunkSize));
@@ -446,7 +446,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           InkWell(onTap: () => _openMap(stop.address, stop.latitude, stop.longitude), child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [Flexible(fit: FlexFit.loose, child: Text(stop.address, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: textColor, height: 1.1))), const Padding(padding: EdgeInsets.only(left: 4.0), child: Icon(Icons.map, size: 20, color: Colors.blueAccent))])),
                           const SizedBox(height: 8),
-                          Row(children: [Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: Colors.orange[50], borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.orange.shade200)), child: Text("${stop.dozens} DOZ", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.deepOrange))), const SizedBox(width: 15), InkWell(onTap: () => _sendTextAndMarkRed(stop), child: Row(children: [const Icon(Icons.message, size: 16, color: Colors.blueGrey), const SizedBox(width: 4), Text(_formatPhone(stop.phone), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.blueGrey, decoration: TextDecoration.underline, decorationStyle: TextDecorationStyle.dotted))]))])
+                          Row(children: [Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2), decoration: BoxDecoration(color: Colors.orange[50], borderRadius: BorderRadius.circular(4), border: Border.all(color: Colors.orange.shade200)), child: Text("${stop.dozens} DOZEN", style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.deepOrange))), const SizedBox(width: 15), InkWell(onTap: () => _sendTextAndMarkRed(stop), child: Row(children: [const Icon(Icons.message, size: 16, color: Colors.blueGrey), const SizedBox(width: 4), Text(_formatPhone(stop.phone), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.blueGrey, decoration: TextDecoration.underline, decorationStyle: TextDecorationStyle.dotted))]))])
                         ])),
                         IconButton(iconSize: 40, padding: EdgeInsets.zero, constraints: const BoxConstraints(), icon: Icon(Icons.check_circle, color: (stop.isCompleted && !stop.isTexted) ? Colors.green : Colors.grey[300]), onPressed: () => _markAsComplete(stop))
                       ]),

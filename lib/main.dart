@@ -57,24 +57,58 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// 2. WRITE DATA (Update Colors)
+// 2. WRITE DATA (Update Colors OR Reorder)
 function doPost(e) {
   var params = JSON.parse(e.postData.contents);
-  var rowIndex = params.row;
-  var action = params.status;
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
 
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1"); 
-  var range = sheet.getRange(rowIndex, 1, 1, 6);
-  
-  if (action == "texted") {
-    range.setBackground("#ea9999"); // Light Red
-    //sheet.getRange(rowIndex, 7).setValue("Not Picked Up");
-  } else {
-    range.setBackground("#b6d7a8"); // Light Green
-    //optionally add text to a column whenever something is marked as delivered
-    //sheet.getRange(rowIndex, 7).setValue("Delivered");
+  // --- ACTION: REORDER ---
+  if (params.action == "reorder") {
+    var indices = params.indices; // Array of original row numbers
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return ContentService.createTextOutput(JSON.stringify({"status": "success"}));
+
+    var range = sheet.getRange(2, 1, lastRow - 1, 6);
+    var values = range.getValues();
+    var backgrounds = range.getBackgrounds();
+    
+    // Map: RowIndex -> {val, bg}
+    var rowMap = {};
+    for (var i = 0; i < values.length; i++) {
+      rowMap[i + 2] = { "val": values[i], "bg": backgrounds[i] };
+    }
+    
+    var newValues = [];
+    var newBg = [];
+    
+    // Reconstruct based on new order
+    for (var k = 0; k < indices.length; k++) {
+      var idx = indices[k];
+      if (rowMap[idx]) {
+        newValues.push(rowMap[idx].val);
+        newBg.push(rowMap[idx].bg);
+        delete rowMap[idx];
+      }
+    }
+    // Append leftovers (inactive/missing rows)
+    for (var key in rowMap) {
+      newValues.push(rowMap[key].val);
+      newBg.push(rowMap[key].bg);
+    }
+    
+    range.setValues(newValues);
+    range.setBackgrounds(newBg);
+    
+    return ContentService.createTextOutput(JSON.stringify({"status": "success"}));
   }
 
+  // --- ACTION: STATUS UPDATE ---
+  var rowIndex = params.row;
+  var action = params.status;
+  var range = sheet.getRange(rowIndex, 1, 1, 6);
+  
+  if (action == "texted") range.setBackground("#ea9999");
+  else range.setBackground("#b6d7a8");
 
   return ContentService.createTextOutput(JSON.stringify({"status": "success"}));
 }
@@ -343,21 +377,57 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     await Future.delayed(const Duration(milliseconds: 50));
 
     // --- PRECOMPUTE DISTANCES (Optimization for Speed) ---
-    // Pre-calculating the distance matrix allows us to run millions of iterations
-    // in the same time it took to run hundreds with raw trig calculations.
+    // We try to fetch real-world "Drive Time" from OSRM API.
+    // If that fails, we fall back to "Straight Line Distance".
     int n = activeStops.length;
     List<List<double>> distMatrix = List.generate(n, (_) => List.filled(n, 0.0));
     List<double> startDist = List.filled(n, 0.0);
+    bool usedApi = false;
 
-    for (int i = 0; i < n; i++) {
-      startDist[i] = _calculateDistance(currentPos.latitude, currentPos.longitude, activeStops[i].latitude!, activeStops[i].longitude!);
-      for (int j = 0; j < n; j++) {
-        if (i == j) {
-          distMatrix[i][j] = 0.0;
-        } else {
-          distMatrix[i][j] = _calculateDistance(activeStops[i].latitude!, activeStops[i].longitude!, activeStops[j].latitude!, activeStops[j].longitude!);
+    // 1. Try OSRM API (Time-based optimization)
+    // OSRM Demo server has limits, so we only try if stops < 100
+    if (n < 100) {
+      try {
+        setState(() => statusMessage = "Fetching Traffic Data...");
+        List<String> coords = [];
+        // OSRM expects "lng,lat"
+        coords.add("${currentPos.longitude},${currentPos.latitude}"); // Index 0
+        for (var s in activeStops) coords.add("${s.longitude},${s.latitude}");
+
+        String url = "https://router.project-osrm.org/table/v1/driving/${coords.join(';')}?annotations=duration";
+        final response = await http.get(Uri.parse(url));
+
+        if (response.statusCode == 200) {
+          var data = jsonDecode(response.body);
+          List<dynamic> durations = data['durations'];
+          
+          // Map OSRM (N+1)x(N+1) matrix to our internal structures
+          for (int i = 0; i < n; i++) {
+            startDist[i] = (durations[0][i + 1] as num).toDouble(); // From Current(0) to Stop(i+1)
+            for (int j = 0; j < n; j++) {
+              distMatrix[i][j] = (durations[i + 1][j + 1] as num).toDouble(); // From Stop(i+1) to Stop(j+1)
+            }
+          }
+          usedApi = true;
+        }
+      } catch (e) {
+        // Silent fail, will use fallback
+        print("OSRM API Failed: $e");
+      }
+    }
+
+    // 2. Fallback to Haversine (Distance-based optimization)
+    if (!usedApi) {
+      setState(() => statusMessage = "Optimizing (Distance)...");
+      for (int i = 0; i < n; i++) {
+        startDist[i] = _calculateDistance(currentPos.latitude, currentPos.longitude, activeStops[i].latitude!, activeStops[i].longitude!);
+        for (int j = 0; j < n; j++) {
+          if (i == j) distMatrix[i][j] = 0.0;
+          else distMatrix[i][j] = _calculateDistance(activeStops[i].latitude!, activeStops[i].longitude!, activeStops[j].latitude!, activeStops[j].longitude!);
         }
       }
+    } else {
+      setState(() => statusMessage = "Optimizing (Drive Time)...");
     }
 
     // Helper to calculate total distance of a permutation
@@ -389,83 +459,166 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
       lastIndex = best;
     }
 
-    // 2. Simulated Annealing (High Iteration Count)
+    // 2. Heavy-Duty Simulated Annealing (Hybrid Genetic-Style)
+    // To approach the "True Global Minimum", we use multiple restarts with
+    // different initializations (Greedy vs Random) and a mix of move operators.
     Random random = Random();
-    List<int> bestIndices = List.from(currentIndices);
-    double currentDist = getRouteDistance(currentIndices);
-    double bestDist = currentDist;
     
-    // Parameters tuned for high quality
-    double temperature = 200.0;
-    double coolingRate = 0.99995; 
-    int maxIterations = 500000; // ~0.5-1 second on modern phones with precomputed matrix
+    // Keep track of the absolute best found across all attempts
+    List<int> globalBestIndices = List.from(currentIndices);
+    double globalBestDist = getRouteDistance(currentIndices);
+    
+    // Configuration for "Deep" Search
+    // We trade time for quality. 
+    int maxRestarts = 20; 
+    Stopwatch stopwatch = Stopwatch()..start();
+    int timeLimitMillis = 4000; // Allow up to 4 seconds of pure crunching
 
-    for (int i = 0; i < maxIterations; i++) {
-      if (temperature < 0.001) break;
+    for (int attempt = 0; attempt < maxRestarts; attempt++) {
+      // If we've spent too much time, stop restarting
+      if (stopwatch.elapsedMilliseconds > timeLimitMillis) break;
 
-      // Randomly choose between 2-Opt (Reverse) and Relocate (Shift)
-      // 2-Opt is good for untangling crossing paths.
-      // Relocate is good for moving misplaced stops (bad tail) to the correct cluster.
-      bool isTwoOpt = random.nextDouble() < 0.8; // 80% 2-Opt, 20% Relocate
-
-      if (isTwoOpt) {
-        // --- 2-OPT (Reverse Segment) ---
-        int p1 = random.nextInt(n);
-        int p2 = random.nextInt(n);
-        if (p1 == p2) continue;
-        
-        int start = min(p1, p2);
-        int end = max(p1, p2);
-
-        _reverseIndices(currentIndices, start, end);
-        double newDist = getRouteDistance(currentIndices);
-        double delta = newDist - currentDist;
-        
-        if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
-          currentDist = newDist;
-          if (currentDist < bestDist) { bestDist = currentDist; bestIndices = List.from(currentIndices); }
-        } else {
-          _reverseIndices(currentIndices, start, end); // Revert
-        }
+      List<int> solverIndices;
+      if (attempt == 0) {
+        // Attempt 0: Start with Nearest Neighbor (Greedy)
+        solverIndices = List.from(currentIndices);
       } else {
-        // --- RELOCATE (Shift Single Stop) ---
-        int itemIdx = random.nextInt(n);
-        int targetIdx = random.nextInt(n); // Insert index (0 to n-1)
-        
-        // Avoid null moves
-        if (itemIdx == targetIdx) continue;
-        if (targetIdx == itemIdx + 1) continue;
-
-        // Perform Shift
-        int val = currentIndices[itemIdx];
-        currentIndices.removeAt(itemIdx);
-        
-        // Adjust target if we removed from before it
-        int actualTarget = targetIdx;
-        if (targetIdx > itemIdx) actualTarget--;
-        
-        currentIndices.insert(actualTarget, val);
-
-        double newDist = getRouteDistance(currentIndices);
-        double delta = newDist - currentDist;
-
-        if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
-          currentDist = newDist;
-          if (currentDist < bestDist) { bestDist = currentDist; bestIndices = List.from(currentIndices); }
-        } else {
-          // Revert Shift
-          currentIndices.removeAt(actualTarget);
-          currentIndices.insert(itemIdx, val);
-        }
+        // Other Attempts: Start with Random Shuffle (Diversity)
+        // This ensures we explore completely different route structures.
+        solverIndices = List.generate(n, (index) => index);
+        solverIndices.shuffle(random);
       }
-      temperature *= coolingRate;
+
+      double currentDist = getRouteDistance(solverIndices);
+      double bestDistLocal = currentDist;
+      List<int> bestIndicesLocal = List.from(solverIndices);
+
+      double temperature = 150.0;
+      double coolingRate = 0.9999; // Slower cooling for deeper search
+      int maxIter = 500000;
+
+      for (int i = 0; i < maxIter; i++) {
+        if (temperature < 0.01) break;
+
+        // Move Strategy:
+        // 50% 2-Opt (Reverse Segment) - Untangles crossings
+        // 40% Or-Opt (Relocate Block) - Fixes bad ordering/clustering
+        // 10% Swap (Exchange 2 stops) - Perturbation
+        double moveType = random.nextDouble();
+
+        if (moveType < 0.5) {
+          // --- 2-OPT (Reverse Segment) ---
+          int p1 = random.nextInt(n);
+          int p2 = random.nextInt(n);
+          if (p1 == p2) continue;
+          int start = min(p1, p2);
+          int end = max(p1, p2);
+
+          _reverseIndices(solverIndices, start, end);
+          double newDist = getRouteDistance(solverIndices);
+          
+          if (newDist < currentDist || exp(-(newDist - currentDist) / temperature) > random.nextDouble()) {
+            currentDist = newDist;
+            if (currentDist < bestDistLocal) {
+              bestDistLocal = currentDist;
+              bestIndicesLocal = List.from(solverIndices);
+            }
+          } else {
+            _reverseIndices(solverIndices, start, end); // Revert
+          }
+        } else if (moveType < 0.9) {
+          // --- OR-OPT (Relocate Block) ---
+          // Move a block of 1 to 6 stops to a new location
+          int blockSize = 1 + random.nextInt(6); 
+          if (n < blockSize + 1) blockSize = 1;
+
+          int itemIdx = random.nextInt(n - blockSize + 1);
+          
+          // Extract block
+          List<int> block = [];
+          for(int k=0; k<blockSize; k++) block.add(solverIndices[itemIdx + k]);
+          
+          // Remove block
+          solverIndices.removeRange(itemIdx, itemIdx + blockSize);
+          
+          // Insert block at new random location
+          int targetIdx = random.nextInt(solverIndices.length + 1);
+          solverIndices.insertAll(targetIdx, block);
+
+          double newDist = getRouteDistance(solverIndices);
+          
+          if (newDist < currentDist || exp(-(newDist - currentDist) / temperature) > random.nextDouble()) {
+            currentDist = newDist;
+            if (currentDist < bestDistLocal) {
+              bestDistLocal = currentDist;
+              bestIndicesLocal = List.from(solverIndices);
+            }
+          } else {
+            // Revert
+            solverIndices.removeRange(targetIdx, targetIdx + blockSize);
+            solverIndices.insertAll(itemIdx, block);
+          }
+        } else {
+          // --- SWAP (Exchange Two Stops) ---
+          int p1 = random.nextInt(n);
+          int p2 = random.nextInt(n);
+          if (p1 == p2) continue;
+          
+          int temp = solverIndices[p1];
+          solverIndices[p1] = solverIndices[p2];
+          solverIndices[p2] = temp;
+          
+          double newDist = getRouteDistance(solverIndices);
+          
+          if (newDist < currentDist || exp(-(newDist - currentDist) / temperature) > random.nextDouble()) {
+            currentDist = newDist;
+            if (currentDist < bestDistLocal) {
+              bestDistLocal = currentDist;
+              bestIndicesLocal = List.from(solverIndices);
+            }
+          } else {
+            // Revert
+            int temp = solverIndices[p1];
+            solverIndices[p1] = solverIndices[p2];
+            solverIndices[p2] = temp;
+          }
+        }
+        temperature *= coolingRate;
+      }
+
+      if (bestDistLocal < globalBestDist) {
+        globalBestDist = bestDistLocal;
+        globalBestIndices = bestIndicesLocal;
+      }
     }
     
-    // Reconstruct the stop list
-    List<DeliveryStop> optimizedStops = bestIndices.map((i) => activeStops[i]).toList();
+    // Reconstruct the stop list from the best result across all restarts
+    List<DeliveryStop> optimizedStops = globalBestIndices.map((i) => activeStops[i]).toList();
     
     setState(() { stops = [...optimizedStops, ...inactiveStops]; isLoading = false; statusMessage = ""; });
     _showErrorSnackBar("Route Optimized! 🚀");
+  }
+
+  Future<void> _syncOrderToSheet() async {
+    if (scriptUrl.isEmpty) return;
+    setState(() { isLoading = true; statusMessage = "Updating Sheet..."; });
+    try {
+      // Send the list of original row indices in their current (optimized) order
+      List<int> indices = stops.map((s) => s.originalRowIndex).toList();
+      
+      await http.post(Uri.parse(scriptUrl), body: jsonEncode({
+        "action": "reorder", "indices": indices
+      }));
+      
+      // Update local indices since sheet is now reordered (Rows start at 2)
+      for (int i = 0; i < stops.length; i++) stops[i].originalRowIndex = i + 2;
+      
+      _showErrorSnackBar("Spreadsheet updated! 📄");
+    } catch (e) {
+      _showErrorSnackBar("Update failed. Check Script.");
+    } finally {
+      setState(() { isLoading = false; statusMessage = ""; });
+    }
   }
 
   void _resetRouteOrder() {
@@ -513,6 +666,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
         title: const Text('Egg Run 🥚', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.teal[100],
         actions: [
+          IconButton(icon: const Icon(Icons.save_alt), onPressed: _syncOrderToSheet, tooltip: "Save Order to Sheet"),
           IconButton(icon: const Icon(Icons.restore), onPressed: _resetRouteOrder, tooltip: "Reset Order"),
           IconButton(icon: const Icon(Icons.auto_awesome), onPressed: _optimizeRoute),
           IconButton(

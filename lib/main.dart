@@ -217,6 +217,9 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
           ));
         }
 
+        // Ensure stops are sorted by their spreadsheet row order initially
+        newStops.sort((a, b) => a.originalRowIndex.compareTo(b.originalRowIndex));
+
         setState(() { stops = newStops; isLoading = false; statusMessage = ""; });
       } else {
         throw Exception('Failed to connect to script');
@@ -335,58 +338,121 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     if (activeStops.isEmpty) { setState(() { stops = inactiveStops; isLoading = false; }); _showErrorSnackBar("No active stops found."); return; }
 
     setState(() => statusMessage = "Optimizing...");
-    List<DeliveryStop> currentPath = [];
-    List<DeliveryStop> pool = List.from(activeStops);
-    double currLat = currentPos.latitude;
-    double currLng = currentPos.longitude;
-    while (pool.isNotEmpty) {
-      int bestIndex = -1;
-      double minDistance = double.infinity;
-      for (int i = 0; i < pool.length; i++) {
-        double d = _calculateDistance(currLat, currLng, pool[i].latitude!, pool[i].longitude!);
-        if (d < minDistance) { minDistance = d; bestIndex = i; }
-      }
-      currentPath.add(pool[bestIndex]);
-      currLat = pool[bestIndex].latitude!;
-      currLng = pool[bestIndex].longitude!;
-      pool.removeAt(bestIndex);
-    }
     
-    // Simulated Annealing
-    double temperature = 1000.0;
-    double coolingRate = 0.9995;
-    List<DeliveryStop> bestPath = List.from(currentPath);
-    double bestDistance = _calculateTotalDistance(bestPath, currentPos);
-    double currentDistance = bestDistance;
+    // Allow UI to update
+    await Future.delayed(const Duration(milliseconds: 50));
+
+    // --- PRECOMPUTE DISTANCES (Optimization for Speed) ---
+    // Pre-calculating the distance matrix allows us to run millions of iterations
+    // in the same time it took to run hundreds with raw trig calculations.
+    int n = activeStops.length;
+    List<List<double>> distMatrix = List.generate(n, (_) => List.filled(n, 0.0));
+    List<double> startDist = List.filled(n, 0.0);
+
+    for (int i = 0; i < n; i++) {
+      startDist[i] = _calculateDistance(currentPos.latitude, currentPos.longitude, activeStops[i].latitude!, activeStops[i].longitude!);
+      for (int j = 0; j < n; j++) {
+        if (i == j) {
+          distMatrix[i][j] = 0.0;
+        } else {
+          distMatrix[i][j] = _calculateDistance(activeStops[i].latitude!, activeStops[i].longitude!, activeStops[j].latitude!, activeStops[j].longitude!);
+        }
+      }
+    }
+
+    // Helper to calculate total distance of a permutation
+    double getRouteDistance(List<int> indices) {
+      if (indices.isEmpty) return 0.0;
+      double total = startDist[indices[0]];
+      for (int i = 0; i < indices.length - 1; i++) {
+        total += distMatrix[indices[i]][indices[i+1]];
+      }
+      return total;
+    }
+
+    // 1. Nearest Neighbor Construction (Initial Guess)
+    List<int> currentIndices = [];
+    Set<int> visited = {};
+    int lastIndex = -1;
+    
+    for (int k = 0; k < n; k++) {
+      int best = -1;
+      double minD = double.infinity;
+      for (int i = 0; i < n; i++) {
+        if (!visited.contains(i)) {
+          double d = (lastIndex == -1) ? startDist[i] : distMatrix[lastIndex][i];
+          if (d < minD) { minD = d; best = i; }
+        }
+      }
+      currentIndices.add(best);
+      visited.add(best);
+      lastIndex = best;
+    }
+
+    // 2. Simulated Annealing (High Iteration Count)
     Random random = Random();
-    int iteration = 0;
-    while (temperature > 0.00001 && iteration < 50000) {
-      iteration++;
-      int index1 = random.nextInt(currentPath.length);
-      int index2 = random.nextInt(currentPath.length);
-      if (index1 == index2) continue;
-      int start = min(index1, index2);
-      int end = max(index1, index2);
-      _reverseSegment(currentPath, start, end);
-      double newDistance = _calculateTotalDistance(currentPath, currentPos);
-      if ((newDistance - currentDistance) < 0 || exp(-(newDistance - currentDistance) / temperature) > random.nextDouble()) {
-        currentDistance = newDistance;
-        if (currentDistance < bestDistance) { bestDistance = currentDistance; bestPath = List.from(currentPath); }
-      } else { _reverseSegment(currentPath, start, end); }
+    List<int> bestIndices = List.from(currentIndices);
+    double currentDist = getRouteDistance(currentIndices);
+    double bestDist = currentDist;
+    
+    // Parameters tuned for high quality
+    double temperature = 200.0;
+    double coolingRate = 0.99995; 
+    int maxIterations = 500000; // ~0.5-1 second on modern phones with precomputed matrix
+
+    for (int i = 0; i < maxIterations; i++) {
+      if (temperature < 0.001) break;
+
+      // 2-Opt Move (Reverse Segment)
+      int p1 = random.nextInt(n);
+      int p2 = random.nextInt(n);
+      if (p1 == p2) continue;
+      
+      int start = min(p1, p2);
+      int end = max(p1, p2);
+
+      // Apply move
+      _reverseIndices(currentIndices, start, end);
+      double newDist = getRouteDistance(currentIndices);
+
+      double delta = newDist - currentDist;
+      
+      // Metropolis Criterion
+      if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
+        currentDist = newDist;
+        if (currentDist < bestDist) {
+          bestDist = currentDist;
+          bestIndices = List.from(currentIndices);
+        }
+      } else {
+        // Revert move
+        _reverseIndices(currentIndices, start, end);
+      }
       temperature *= coolingRate;
     }
-    setState(() { stops = [...bestPath, ...inactiveStops]; isLoading = false; statusMessage = ""; });
+    
+    // Reconstruct the stop list
+    List<DeliveryStop> optimizedStops = bestIndices.map((i) => activeStops[i]).toList();
+    
+    setState(() { stops = [...optimizedStops, ...inactiveStops]; isLoading = false; statusMessage = ""; });
     _showErrorSnackBar("Route Optimized! 🚀");
   }
-  
-  void _reverseSegment(List<DeliveryStop> path, int i, int k) {
-    while (i < k) { var temp = path[i]; path[i] = path[k]; path[k] = temp; i++; k--; }
+
+  void _resetRouteOrder() {
+    setState(() {
+      stops.sort((a, b) => a.originalRowIndex.compareTo(b.originalRowIndex));
+    });
+    _showErrorSnackBar("Route reset to spreadsheet order.");
   }
-  double _calculateTotalDistance(List<DeliveryStop> path, Position start) {
-    if (path.isEmpty) return 0.0;
-    double total = _calculateDistance(start.latitude, start.longitude, path[0].latitude!, path[0].longitude!);
-    for (int i = 0; i < path.length - 1; i++) total += _calculateDistance(path[i].latitude!, path[i].longitude!, path[i+1].latitude!, path[i+1].longitude!);
-    return total;
+  
+  void _reverseIndices(List<int> indices, int i, int k) {
+    while (i < k) {
+      int temp = indices[i];
+      indices[i] = indices[k];
+      indices[k] = temp;
+      i++;
+      k--;
+    }
   }
   double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     var p = 0.017453292519943295;
@@ -417,6 +483,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
         title: const Text('Egg Run 🥚', style: TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: Colors.teal[100],
         actions: [
+          IconButton(icon: const Icon(Icons.restore), onPressed: _resetRouteOrder, tooltip: "Reset Order"),
           IconButton(icon: const Icon(Icons.auto_awesome), onPressed: _optimizeRoute),
           IconButton(
             icon: const Icon(Icons.refresh), 

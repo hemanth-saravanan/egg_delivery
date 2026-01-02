@@ -10,21 +10,16 @@ import 'dart:math' show cos, sqrt, asin, min, max, exp, Random;
 
 // --- THE NEW GOOGLE APPS SCRIPT CODE (Includes doGet) ---
 const String _googleScriptCode = r'''
-// 1. READ DATA (Fetch rows + Colors)
 function doGet(e) {
-
-  //Edit Sheet1 to be the name of the sheet with your data
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
   var lastRow = sheet.getLastRow();
   
-  // If sheet is empty, return empty list
+
   if (lastRow < 2) {
     return ContentService.createTextOutput(JSON.stringify([]))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // Get all data and all background colors in one batch
-  // We assume columns A-F (1-6)
   var range = sheet.getRange(2, 1, lastRow - 1, 6);
   var values = range.getValues();
   var backgrounds = range.getBackgrounds();
@@ -32,12 +27,12 @@ function doGet(e) {
   var data = [];
 
   for (var i = 0; i < values.length; i++) {
+    // Stop reading if the first column (Name) is empty
+    if (values[i][0] === "") break;
+
     var color = backgrounds[i][0].toLowerCase(); // Check color of Column A
     var status = "pending";
 
-    // Map specific colors to status
-    // #b6d7a8 is the Light Green we use
-    // #ea9999 is the Light Red we use
     if (color == "#b6d7a8") status = "complete";
     if (color == "#ea9999") status = "texted";
 
@@ -57,12 +52,10 @@ function doGet(e) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-// 2. WRITE DATA (Update Colors OR Reorder)
 function doPost(e) {
   var params = JSON.parse(e.postData.contents);
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Sheet1");
 
-  // --- ACTION: REORDER ---
   if (params.action == "reorder") {
     var indices = params.indices; // Array of original row numbers
     var lastRow = sheet.getLastRow();
@@ -72,7 +65,6 @@ function doPost(e) {
     var values = range.getValues();
     var backgrounds = range.getBackgrounds();
     
-    // Map: RowIndex -> {val, bg}
     var rowMap = {};
     for (var i = 0; i < values.length; i++) {
       rowMap[i + 2] = { "val": values[i], "bg": backgrounds[i] };
@@ -81,7 +73,6 @@ function doPost(e) {
     var newValues = [];
     var newBg = [];
     
-    // Reconstruct based on new order
     for (var k = 0; k < indices.length; k++) {
       var idx = indices[k];
       if (rowMap[idx]) {
@@ -90,7 +81,7 @@ function doPost(e) {
         delete rowMap[idx];
       }
     }
-    // Append leftovers (inactive/missing rows)
+
     for (var key in rowMap) {
       newValues.push(rowMap[key].val);
       newBg.push(rowMap[key].bg);
@@ -102,7 +93,6 @@ function doPost(e) {
     return ContentService.createTextOutput(JSON.stringify({"status": "success"}));
   }
 
-  // --- ACTION: STATUS UPDATE ---
   var rowIndex = params.row;
   var action = params.status;
   var range = sheet.getRange(rowIndex, 1, 1, 6);
@@ -783,6 +773,7 @@ class SettingsPage extends StatefulWidget { const SettingsPage({super.key}); @ov
 class _SettingsPageState extends State<SettingsPage> {
   final _scriptController = TextEditingController(); 
   final _msgController = TextEditingController(); 
+  final _sheetNameController = TextEditingController();
   bool _useWhatsApp = false;
   
   // Route Settings
@@ -798,6 +789,7 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() { 
       _scriptController.text = prefs.getString('script_link') ?? ""; 
       _msgController.text = prefs.getString('msg_template') ?? "Hi! Your {dozens} dozen eggs have been delivered."; 
+      _sheetNameController.text = prefs.getString('sheet_name') ?? "Sheet1";
       _useWhatsApp = prefs.getBool('use_whatsapp') ?? false;
       _useCurrentStart = prefs.getBool('use_current_start') ?? true;
       _startAddrController.text = prefs.getString('start_address') ?? "";
@@ -811,6 +803,7 @@ class _SettingsPageState extends State<SettingsPage> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('script_link', _scriptController.text.trim()); 
       await prefs.setString('msg_template', _msgController.text); 
+      await prefs.setString('sheet_name', _sheetNameController.text.trim());
       await prefs.setBool('use_whatsapp', _useWhatsApp);
       
       await prefs.setBool('use_current_start', _useCurrentStart);
@@ -823,7 +816,12 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) { if (mounted) showDialog(context: context, builder: (context) => AlertDialog(title: const Text("Error"), content: Text(e.toString()), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text("OK"))])); }
   }
   void _showHelp(String title, String content) { showDialog(context: context, builder: (context) => AlertDialog(title: Text(title, style: const TextStyle(color: Colors.teal)), content: SingleChildScrollView(child: Text(content, style: const TextStyle(fontSize: 16))), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close"))])); }
-  void _copyScript() { Clipboard.setData(ClipboardData(text: _googleScriptCode)).then((_) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Script copied to clipboard! 📋"))); }); }
+  void _copyScript() {
+    String sheetName = _sheetNameController.text.trim();
+    if (sheetName.isEmpty) sheetName = "Sheet1";
+    String code = _googleScriptCode.replaceAll('getSheetByName("Sheet1")', 'getSheetByName("$sheetName")');
+    Clipboard.setData(ClipboardData(text: code)).then((_) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Script copied to clipboard! 📋"))); });
+  }
   @override Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text("Settings")),
@@ -832,6 +830,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const Divider(), const SizedBox(height: 10),
           Row(children: [const Text("1. Google Script URL", style: TextStyle(fontWeight: FontWeight.bold)), IconButton(icon: const Icon(Icons.help_outline, color: Colors.blue), onPressed: () => _showHelp("How to set up Script", "1. Make your Google Sheet according to required format\n2. Extensions > Apps Script.\n3. Paste code (Copy button ->).\n4. Deploy > New deployment > Web app.\n5. Access: 'Anyone'.\n6. Deploy & Copy URL.")), TextButton.icon(onPressed: _copyScript, icon: const Icon(Icons.copy, size: 16), label: const Text("COPY SCRIPT"), style: TextButton.styleFrom(foregroundColor: Colors.teal, textStyle: const TextStyle(fontWeight: FontWeight.bold)))]),
           TextField(controller: _scriptController, decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "https://script.google.com/..."), maxLines: 2),
+          const SizedBox(height: 10),
+          TextField(controller: _sheetNameController, decoration: const InputDecoration(labelText: "Sheet Tab Name (e.g. Sheet1)", border: OutlineInputBorder())),
           const SizedBox(height: 20), const Text("2. Message Template", style: TextStyle(fontWeight: FontWeight.bold)), TextField(controller: _msgController, decoration: const InputDecoration(border: OutlineInputBorder()), maxLines: 2),
           const SizedBox(height: 20), SwitchListTile(title: const Text("Use WhatsApp"), value: _useWhatsApp, onChanged: (val) => setState(() => _useWhatsApp = val)),
           

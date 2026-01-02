@@ -403,30 +403,60 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     for (int i = 0; i < maxIterations; i++) {
       if (temperature < 0.001) break;
 
-      // 2-Opt Move (Reverse Segment)
-      int p1 = random.nextInt(n);
-      int p2 = random.nextInt(n);
-      if (p1 == p2) continue;
-      
-      int start = min(p1, p2);
-      int end = max(p1, p2);
+      // Randomly choose between 2-Opt (Reverse) and Relocate (Shift)
+      // 2-Opt is good for untangling crossing paths.
+      // Relocate is good for moving misplaced stops (bad tail) to the correct cluster.
+      bool isTwoOpt = random.nextDouble() < 0.8; // 80% 2-Opt, 20% Relocate
 
-      // Apply move
-      _reverseIndices(currentIndices, start, end);
-      double newDist = getRouteDistance(currentIndices);
+      if (isTwoOpt) {
+        // --- 2-OPT (Reverse Segment) ---
+        int p1 = random.nextInt(n);
+        int p2 = random.nextInt(n);
+        if (p1 == p2) continue;
+        
+        int start = min(p1, p2);
+        int end = max(p1, p2);
 
-      double delta = newDist - currentDist;
-      
-      // Metropolis Criterion
-      if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
-        currentDist = newDist;
-        if (currentDist < bestDist) {
-          bestDist = currentDist;
-          bestIndices = List.from(currentIndices);
+        _reverseIndices(currentIndices, start, end);
+        double newDist = getRouteDistance(currentIndices);
+        double delta = newDist - currentDist;
+        
+        if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
+          currentDist = newDist;
+          if (currentDist < bestDist) { bestDist = currentDist; bestIndices = List.from(currentIndices); }
+        } else {
+          _reverseIndices(currentIndices, start, end); // Revert
         }
       } else {
-        // Revert move
-        _reverseIndices(currentIndices, start, end);
+        // --- RELOCATE (Shift Single Stop) ---
+        int itemIdx = random.nextInt(n);
+        int targetIdx = random.nextInt(n); // Insert index (0 to n-1)
+        
+        // Avoid null moves
+        if (itemIdx == targetIdx) continue;
+        if (targetIdx == itemIdx + 1) continue;
+
+        // Perform Shift
+        int val = currentIndices[itemIdx];
+        currentIndices.removeAt(itemIdx);
+        
+        // Adjust target if we removed from before it
+        int actualTarget = targetIdx;
+        if (targetIdx > itemIdx) actualTarget--;
+        
+        currentIndices.insert(actualTarget, val);
+
+        double newDist = getRouteDistance(currentIndices);
+        double delta = newDist - currentDist;
+
+        if (delta < 0 || exp(-delta / temperature) > random.nextDouble()) {
+          currentDist = newDist;
+          if (currentDist < bestDist) { bestDist = currentDist; bestIndices = List.from(currentIndices); }
+        } else {
+          // Revert Shift
+          currentIndices.removeAt(actualTarget);
+          currentIndices.insert(itemIdx, val);
+        }
       }
       temperature *= coolingRate;
     }

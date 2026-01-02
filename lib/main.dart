@@ -353,15 +353,54 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
 
   Future<void> _optimizeRoute() async {
     if (stops.isEmpty) return;
-    setState(() { isLoading = true; statusMessage = "Getting GPS..."; });
-    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-    if (!serviceEnabled) { _showErrorSnackBar("Enable GPS first!"); setState(() => isLoading = false); return; }
-    LocationPermission permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
+    
+    // Load Route Settings
+    final prefs = await SharedPreferences.getInstance();
+    bool useCurrentStart = prefs.getBool('use_current_start') ?? true;
+    String startAddress = prefs.getString('start_address') ?? "";
+    bool useEndAddress = prefs.getBool('use_end_address') ?? false;
+    bool useCurrentEnd = prefs.getBool('use_current_end') ?? true;
+    String endAddress = prefs.getString('end_address') ?? "";
+
+    double? startLat, startLng;
+    double? endLat, endLng;
+
+    setState(() { isLoading = true; statusMessage = "Resolving Locations..."; });
+
+    // 1. Resolve Start Location
+    if (useCurrentStart) {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) { _showErrorSnackBar("Enable GPS for Start Location!"); setState(() => isLoading = false); return; }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) { setState(() => isLoading = false); return; }
+      
+      Position pos = await Geolocator.getCurrentPosition();
+      startLat = pos.latitude; startLng = pos.longitude;
+    } else {
+      if (startAddress.isEmpty) { _showErrorSnackBar("Set Start Address in Settings"); setState(() => isLoading = false); return; }
+      var coords = await _getCoordinatesFromAddress(startAddress);
+      if (coords == null) { _showErrorSnackBar("Start Address not found"); setState(() => isLoading = false); return; }
+      startLat = coords['lat']; startLng = coords['lng'];
     }
-    Position currentPos = await Geolocator.getCurrentPosition();
+
+    // 2. Resolve End Location (if used)
+    if (useEndAddress) {
+      if (useCurrentEnd) {
+        // If we just got GPS for start, reuse it (assuming round trip from current location)
+        if (useCurrentStart && startLat != null) {
+          endLat = startLat; endLng = startLng;
+        } else {
+          Position pos = await Geolocator.getCurrentPosition();
+          endLat = pos.latitude; endLng = pos.longitude;
+        }
+      } else {
+        if (endAddress.isEmpty) { _showErrorSnackBar("Set End Address in Settings"); setState(() => isLoading = false); return; }
+        var coords = await _getCoordinatesFromAddress(endAddress);
+        if (coords == null) { _showErrorSnackBar("End Address not found"); setState(() => isLoading = false); return; }
+        endLat = coords['lat']; endLng = coords['lng'];
+      }
+    }
 
     List<DeliveryStop> activeStops = [];
     List<DeliveryStop> inactiveStops = [];
@@ -382,6 +421,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     int n = activeStops.length;
     List<List<double>> distMatrix = List.generate(n, (_) => List.filled(n, 0.0));
     List<double> startDist = List.filled(n, 0.0);
+    List<double> endDist = List.filled(n, 0.0); // Distance from Stop -> End
     bool usedApi = false;
 
     // 1. Try OSRM API (Time-based optimization)
@@ -391,8 +431,10 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
         setState(() => statusMessage = "Fetching Traffic Data...");
         List<String> coords = [];
         // OSRM expects "lng,lat"
-        coords.add("${currentPos.longitude},${currentPos.latitude}"); // Index 0
+        coords.add("$startLng,$startLat"); // Index 0: Start
         for (var s in activeStops) coords.add("${s.longitude},${s.latitude}");
+        // If end address exists, add it as the last coordinate
+        if (endLat != null) coords.add("$endLng,$endLat");
 
         String url = "https://router.project-osrm.org/table/v1/driving/${coords.join(';')}?annotations=duration";
         final response = await http.get(Uri.parse(url));
@@ -401,11 +443,15 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
           var data = jsonDecode(response.body);
           List<dynamic> durations = data['durations'];
           
-          // Map OSRM (N+1)x(N+1) matrix to our internal structures
+          // Map OSRM matrix to our internal structures
+          // durations indices: 0=Start, 1..N=Stops, N+1=End (if exists)
           for (int i = 0; i < n; i++) {
             startDist[i] = (durations[0][i + 1] as num).toDouble(); // From Current(0) to Stop(i+1)
             for (int j = 0; j < n; j++) {
               distMatrix[i][j] = (durations[i + 1][j + 1] as num).toDouble(); // From Stop(i+1) to Stop(j+1)
+            }
+            if (endLat != null) {
+              endDist[i] = (durations[i + 1][n + 1] as num).toDouble(); // From Stop(i+1) to End(N+1)
             }
           }
           usedApi = true;
@@ -420,11 +466,12 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     if (!usedApi) {
       setState(() => statusMessage = "Optimizing (Distance)...");
       for (int i = 0; i < n; i++) {
-        startDist[i] = _calculateDistance(currentPos.latitude, currentPos.longitude, activeStops[i].latitude!, activeStops[i].longitude!);
+        startDist[i] = _calculateDistance(startLat!, startLng!, activeStops[i].latitude!, activeStops[i].longitude!);
         for (int j = 0; j < n; j++) {
           if (i == j) distMatrix[i][j] = 0.0;
           else distMatrix[i][j] = _calculateDistance(activeStops[i].latitude!, activeStops[i].longitude!, activeStops[j].latitude!, activeStops[j].longitude!);
         }
+        if (endLat != null) endDist[i] = _calculateDistance(activeStops[i].latitude!, activeStops[i].longitude!, endLat, endLng!);
       }
     } else {
       setState(() => statusMessage = "Optimizing (Drive Time)...");
@@ -436,6 +483,9 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
       double total = startDist[indices[0]];
       for (int i = 0; i < indices.length - 1; i++) {
         total += distMatrix[indices[i]][indices[i+1]];
+      }
+      if (endLat != null) {
+        total += endDist[indices.last];
       }
       return total;
     }
@@ -643,6 +693,21 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
     var a = 0.5 - c((lat2 - lat1) * p) / 2 + c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
     return 12742 * asin(sqrt(a));
   }
+
+  Future<Map<String, double>?> _getCoordinatesFromAddress(String address) async {
+    try {
+      final url = Uri.parse("https://nominatim.openstreetmap.org/search?q=${Uri.encodeComponent(address)}&format=json&limit=1");
+      final response = await http.get(url, headers: {'User-Agent': 'EggDeliveryApp/1.0'});
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data is List && data.isNotEmpty) {
+          return {'lat': double.parse(data[0]['lat']), 'lng': double.parse(data[0]['lon'])};
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
   void _navigateToSettings() async {
     await Navigator.push(context, MaterialPageRoute(builder: (context) => const SettingsPage()));
     _loadSettingsAndFetch();
@@ -716,16 +781,44 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
 
 class SettingsPage extends StatefulWidget { const SettingsPage({super.key}); @override State<SettingsPage> createState() => _SettingsPageState(); }
 class _SettingsPageState extends State<SettingsPage> {
-  final _scriptController = TextEditingController(); final _msgController = TextEditingController(); bool _useWhatsApp = false;
+  final _scriptController = TextEditingController(); 
+  final _msgController = TextEditingController(); 
+  bool _useWhatsApp = false;
+  
+  // Route Settings
+  bool _useCurrentStart = true;
+  final _startAddrController = TextEditingController();
+  bool _useEndAddress = false;
+  bool _useCurrentEnd = true;
+  final _endAddrController = TextEditingController();
+
   @override void initState() { super.initState(); _loadCurrentSettings(); }
   Future<void> _loadCurrentSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() { _scriptController.text = prefs.getString('script_link') ?? ""; _msgController.text = prefs.getString('msg_template') ?? "Hi! Your {dozens} dozen eggs have been delivered."; _useWhatsApp = prefs.getBool('use_whatsapp') ?? false; });
+    setState(() { 
+      _scriptController.text = prefs.getString('script_link') ?? ""; 
+      _msgController.text = prefs.getString('msg_template') ?? "Hi! Your {dozens} dozen eggs have been delivered."; 
+      _useWhatsApp = prefs.getBool('use_whatsapp') ?? false;
+      _useCurrentStart = prefs.getBool('use_current_start') ?? true;
+      _startAddrController.text = prefs.getString('start_address') ?? "";
+      _useEndAddress = prefs.getBool('use_end_address') ?? false;
+      _useCurrentEnd = prefs.getBool('use_current_end') ?? true;
+      _endAddrController.text = prefs.getString('end_address') ?? "";
+    });
   }
   Future<void> _saveSettings() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('script_link', _scriptController.text.trim()); await prefs.setString('msg_template', _msgController.text); await prefs.setBool('use_whatsapp', _useWhatsApp);
+      await prefs.setString('script_link', _scriptController.text.trim()); 
+      await prefs.setString('msg_template', _msgController.text); 
+      await prefs.setBool('use_whatsapp', _useWhatsApp);
+      
+      await prefs.setBool('use_current_start', _useCurrentStart);
+      await prefs.setString('start_address', _startAddrController.text.trim());
+      await prefs.setBool('use_end_address', _useEndAddress);
+      await prefs.setBool('use_current_end', _useCurrentEnd);
+      await prefs.setString('end_address', _endAddrController.text.trim());
+
       if (mounted) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Settings Saved!"), backgroundColor: Colors.green)); Navigator.pop(context); }
     } catch (e) { if (mounted) showDialog(context: context, builder: (context) => AlertDialog(title: const Text("Error"), content: Text(e.toString()), actions: [TextButton(onPressed: ()=>Navigator.pop(context), child: const Text("OK"))])); }
   }
@@ -741,6 +834,22 @@ class _SettingsPageState extends State<SettingsPage> {
           TextField(controller: _scriptController, decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "https://script.google.com/..."), maxLines: 2),
           const SizedBox(height: 20), const Text("2. Message Template", style: TextStyle(fontWeight: FontWeight.bold)), TextField(controller: _msgController, decoration: const InputDecoration(border: OutlineInputBorder()), maxLines: 2),
           const SizedBox(height: 20), SwitchListTile(title: const Text("Use WhatsApp"), value: _useWhatsApp, onChanged: (val) => setState(() => _useWhatsApp = val)),
+          
+          const Divider(), const SizedBox(height: 10),
+          const Text("3. Route Optimization", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          const SizedBox(height: 10),
+          const Text("Start Location:", style: TextStyle(fontWeight: FontWeight.bold)),
+          CheckboxListTile(title: const Text("Use Current Address as Start"), value: _useCurrentStart, onChanged: (val) => setState(() => _useCurrentStart = val!)),
+          if (!_useCurrentStart) TextField(controller: _startAddrController, decoration: const InputDecoration(labelText: "Start Address", border: OutlineInputBorder())),
+          
+          const SizedBox(height: 10),
+          const Text("End Location:", style: TextStyle(fontWeight: FontWeight.bold)),
+          CheckboxListTile(title: const Text("Use End Address"), value: _useEndAddress, onChanged: (val) => setState(() => _useEndAddress = val!)),
+          if (_useEndAddress) ...[
+            CheckboxListTile(title: const Text("Use Current Address as End"), value: _useCurrentEnd, onChanged: (val) => setState(() => _useCurrentEnd = val!)),
+            if (!_useCurrentEnd) TextField(controller: _endAddrController, decoration: const InputDecoration(labelText: "End Address", border: OutlineInputBorder())),
+          ],
+
           const SizedBox(height: 30), SizedBox(width: double.infinity, child: ElevatedButton(onPressed: _saveSettings, child: const Text("SAVE SETTINGS"))),
       ]))),
     );

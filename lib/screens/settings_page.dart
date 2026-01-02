@@ -94,15 +94,16 @@ class _SettingsPageState extends State<SettingsPage> {
             ]));
   }
 
-  void _copyScript() {
+  Future<void> _copyScript() async {
     String sheetName = _sheetNameController.text.trim();
     if (sheetName.isEmpty) sheetName = "Sheet1";
     String code =
         googleScriptCode.replaceAll('getSheetByName("Sheet1")', 'getSheetByName("$sheetName")');
-    Clipboard.setData(ClipboardData(text: code)).then((_) {
+    await Clipboard.setData(ClipboardData(text: code));
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("Script copied to clipboard! 📋")));
-    });
+    }
   }
 
   @override
@@ -173,7 +174,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 CheckboxListTile(
                     title: const Text("Use Current Address as Start"),
                     value: _useCurrentStart,
-                    onChanged: (val) => setState(() => _useCurrentStart = val!)),
+                    onChanged: (val) => setState(() => _useCurrentStart = val ?? false)),
                 if (!_useCurrentStart)
                   TextField(
                       controller: _startAddrController,
@@ -186,13 +187,13 @@ class _SettingsPageState extends State<SettingsPage> {
                 CheckboxListTile(
                     title: const Text("Use End Address"),
                     value: _useEndAddress,
-                    onChanged: (val) => setState(() => _useEndAddress = val!)),
+                    onChanged: (val) => setState(() => _useEndAddress = val ?? false)),
                 if (_useEndAddress) ...[
                   CheckboxListTile(
                       title: const Text("Use Current Address as End"),
                       value: _useCurrentEnd,
                       onChanged: (val) =>
-                          setState(() => _useCurrentEnd = val!)),
+                          setState(() => _useCurrentEnd = val ?? false)),
                   if (!_useCurrentEnd)
                     TextField(
                         controller: _endAddrController,

@@ -23,6 +23,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
   String scriptUrl = "";
   String messageTemplate = "";
   bool useWhatsApp = false;
+  bool _isDarkMode = false;
 
   late SheetsService _sheetsService;
   final RouteOptimizer _routeOptimizer = RouteOptimizer();
@@ -40,6 +41,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
       messageTemplate = prefs.getString('msg_template') ??
           "Hi! Your {dozens} dozen eggs have been delivered.";
       useWhatsApp = prefs.getBool('use_whatsapp') ?? false;
+      _isDarkMode = prefs.getBool('is_dark_mode') ?? false;
     });
 
     if (scriptUrl.isEmpty) {
@@ -199,11 +201,21 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: _isDarkMode ? Colors.grey[900] : Colors.white,
       appBar: AppBar(
         title: const Text('Egg Run 🥚',
             style: TextStyle(fontWeight: FontWeight.bold)),
-        backgroundColor: Colors.teal[100],
+        backgroundColor: _isDarkMode ? Colors.grey[850] : Colors.teal[100],
+        foregroundColor: _isDarkMode ? Colors.white : Colors.black,
         actions: [
+          IconButton(
+              icon: Icon(_isDarkMode ? Icons.light_mode : Icons.dark_mode),
+              onPressed: () async {
+                setState(() => _isDarkMode = !_isDarkMode);
+                final prefs = await SharedPreferences.getInstance();
+                prefs.setBool('is_dark_mode', _isDarkMode);
+              },
+              tooltip: "Toggle Theme"),
           IconButton(
               icon: const Icon(Icons.save_alt),
               onPressed: _syncOrderToSheet,
@@ -238,7 +250,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
                     Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(8.0),
-                        color: Colors.teal[50],
+                        color: _isDarkMode ? Colors.grey[800] : Colors.teal[50],
                         child: ElevatedButton.icon(
                             icon: const Icon(Icons.navigation),
                             label: const Text("START NAVIGATION (ALL STOPS)"),
@@ -261,6 +273,7 @@ class _DeliveryListPageState extends State<DeliveryListPage> {
                               onSendText: _sendTextAndMarkRed,
                               openMap: _openMap,
                               formatPhone: _formatPhone,
+                              isDarkMode: _isDarkMode,
                             );
                           }))
                 ]),
@@ -288,6 +301,7 @@ class DeliveryStopCard extends StatelessWidget {
   final Function(DeliveryStop) onSendText;
   final Function(String, double?, double?) openMap;
   final String Function(String) formatPhone;
+  final bool isDarkMode;
 
   const DeliveryStopCard({
     super.key,
@@ -297,25 +311,27 @@ class DeliveryStopCard extends StatelessWidget {
     required this.onSendText,
     required this.openMap,
     required this.formatPhone,
+    required this.isDarkMode,
   });
 
   @override
   Widget build(BuildContext context) {
-    Color bgColor = Colors.white;
+    Color bgColor = isDarkMode ? Colors.grey[800]! : Colors.white;
     Color borderColor = Colors.transparent;
     Color avatarColor = Colors.teal;
-    Color textColor = Colors.black87;
+    Color textColor = isDarkMode ? Colors.white : Colors.black87;
+    Color phoneColor = isDarkMode ? Colors.blue[200]! : Colors.blueGrey;
 
     if (stop.isTexted) {
-      bgColor = Colors.red[50]!;
-      borderColor = Colors.red.shade300;
+      bgColor = isDarkMode ? const Color(0xFF3B1010) : Colors.red[50]!;
+      borderColor = isDarkMode ? Colors.red.shade700 : Colors.red.shade300;
       avatarColor = Colors.red;
-      textColor = Colors.grey;
+      textColor = isDarkMode ? Colors.grey[400]! : Colors.grey;
     } else if (stop.isCompleted) {
-      bgColor = Colors.green[50]!;
-      borderColor = Colors.green.shade300;
+      bgColor = isDarkMode ? const Color(0xFF103B10) : Colors.green[50]!;
+      borderColor = isDarkMode ? Colors.green.shade700 : Colors.green.shade300;
       avatarColor = Colors.green;
-      textColor = Colors.grey;
+      textColor = isDarkMode ? Colors.grey[400]! : Colors.grey;
     }
 
     return Card(
@@ -386,18 +402,17 @@ class DeliveryStopCard extends StatelessWidget {
                         children: [
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 2),
+                                horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
-                              color: Colors.orange[50],
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: Colors.orange.shade200),
+                              color: Colors.deepOrange,
+                              borderRadius: BorderRadius.circular(8),
                             ),
                             child: Text(
                               "${stop.dozens} DOZEN",
                               style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.deepOrange,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                                color: Colors.white,
                               ),
                             ),
                           ),
@@ -412,15 +427,15 @@ class DeliveryStopCard extends StatelessWidget {
                                     onTap: () => onSendText(stop),
                                     child: Row(
                                       children: [
-                                        const Icon(Icons.message,
-                                            size: 16, color: Colors.blueGrey),
+                                        Icon(Icons.message,
+                                            size: 16, color: phoneColor),
                                         const SizedBox(width: 4),
                                         Text(
                                           formatPhone(stop.phone),
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                             fontSize: 16,
                                             fontWeight: FontWeight.w600,
-                                            color: Colors.blueGrey,
+                                            color: phoneColor,
                                             decoration: TextDecoration.underline,
                                             decorationStyle:
                                                 TextDecorationStyle.dotted,
@@ -467,9 +482,9 @@ class DeliveryStopCard extends StatelessWidget {
                 padding: const EdgeInsets.all(8),
                 width: double.infinity,
                 decoration: BoxDecoration(
-                  color: Colors.yellow[100],
+                  color: isDarkMode ? Colors.brown[900] : Colors.yellow[100],
                   borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.yellow.shade600, width: 0.5),
+                  border: Border.all(color: isDarkMode ? Colors.orange.shade900 : Colors.yellow.shade600, width: 0.5),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -480,10 +495,10 @@ class DeliveryStopCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         stop.notes,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
-                          color: Colors.black87,
+                          color: isDarkMode ? Colors.white : Colors.black87,
                         ),
                       ),
                     ),
